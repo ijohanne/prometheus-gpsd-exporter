@@ -47,6 +47,56 @@ in
           default = 300;
           description = "Maximum retry delay in seconds.";
         };
+        disableMonitorSatellites = mkOption {
+          type = types.bool;
+          default = false;
+          description = "Disable per-satellite monitoring.";
+        };
+        ppsHistogram = mkOption {
+          type = types.bool;
+          default = false;
+          description = "Enable PPS clock offset histogram.";
+        };
+        ppsBucketSize = mkOption {
+          type = types.int;
+          default = 250;
+          description = "PPS histogram bucket size in nanoseconds.";
+        };
+        ppsBucketCount = mkOption {
+          type = types.int;
+          default = 40;
+          description = "PPS histogram bucket count.";
+        };
+        ppsTime1 = mkOption {
+          type = types.float;
+          default = 0.0;
+          description = "PPS time1 offset correction.";
+        };
+        offsetFromGeopoint = mkOption {
+          type = types.bool;
+          default = false;
+          description = "Enable geo-offset tracking from a fixed reference point.";
+        };
+        geopointLat = mkOption {
+          type = types.float;
+          default = 0.0;
+          description = "Latitude of fixed reference point.";
+        };
+        geopointLon = mkOption {
+          type = types.float;
+          default = 0.0;
+          description = "Longitude of fixed reference point.";
+        };
+        geoBucketSize = mkOption {
+          type = types.float;
+          default = 0.5;
+          description = "Geo histogram bucket size in meters.";
+        };
+        geoBucketCount = mkOption {
+          type = types.int;
+          default = 40;
+          description = "Geo histogram bucket count.";
+        };
         user = mkOption {
           type = types.str;
           default = "${name}-exporter";
@@ -80,7 +130,17 @@ in
             --listen-address ${cfg.listenAddress} \
             --timeout ${toString cfg.timeout} \
             --retry-delay ${toString cfg.retryDelay} \
-            --max-retry-delay ${toString cfg.maxRetryDelay}
+            --max-retry-delay ${toString cfg.maxRetryDelay} \
+            ${optionalString cfg.disableMonitorSatellites "--disable-monitor-satellites"} \
+            ${optionalString cfg.ppsHistogram "--pps-histogram"} \
+            --pps-bucket-size ${toString cfg.ppsBucketSize} \
+            --pps-bucket-count ${toString cfg.ppsBucketCount} \
+            --pps-time1 ${toString cfg.ppsTime1} \
+            ${optionalString cfg.offsetFromGeopoint "--offset-from-geopoint"} \
+            --geopoint-lat ${toString cfg.geopointLat} \
+            --geopoint-lon ${toString cfg.geopointLon} \
+            --geo-bucket-size ${toString cfg.geoBucketSize} \
+            --geo-bucket-count ${toString cfg.geoBucketCount}
         '';
       in
       {

@@ -1,6 +1,9 @@
-use prometheus::{GaugeVec, Opts, Registry};
+use prometheus::{GaugeVec, Histogram, HistogramOpts, HistogramVec, Opts, Registry};
 
 use crate::gpsd::{GpsdMessage, Satellite};
+
+const NSEC: f64 = 1_000_000_000.0;
+const EARTH_RADIUS_M: f64 = 6_371_000.0;
 
 macro_rules! gauge {
     ($registry:expr, $name:expr, $help:expr) => {{
@@ -20,8 +23,23 @@ macro_rules! gauge_vec {
     }};
 }
 
+#[derive(Clone, Debug)]
+pub struct MetricsConfig {
+    pub monitor_satellites: bool,
+    pub pps_histogram: bool,
+    pub pps_bucket_size: i64,
+    pub pps_bucket_count: i64,
+    pub pps_time1: f64,
+    pub geo_offset: bool,
+    pub geo_lat: f64,
+    pub geo_lon: f64,
+    pub geo_bucket_size: f64,
+    pub geo_bucket_count: i64,
+}
+
 pub struct Metrics {
     pub registry: Registry,
+    pub config: MetricsConfig,
 
     // TPV
     pub lat: prometheus::Gauge,
@@ -79,14 +97,14 @@ pub struct Metrics {
     pub sat_used: prometheus::Gauge,
     pub sat_seen: prometheus::Gauge,
 
-    // Per-satellite
-    pub sat_ss: GaugeVec,
-    pub sat_az: GaugeVec,
-    pub sat_el: GaugeVec,
-    pub sat_is_used: GaugeVec,
-    pub sat_health: GaugeVec,
-    pub sat_sigid: GaugeVec,
-    pub sat_freqid: GaugeVec,
+    // Per-satellite (None if disabled)
+    pub sat_ss: Option<GaugeVec>,
+    pub sat_az: Option<GaugeVec>,
+    pub sat_el: Option<GaugeVec>,
+    pub sat_is_used: Option<GaugeVec>,
+    pub sat_health: Option<GaugeVec>,
+    pub sat_sigid: Option<GaugeVec>,
+    pub sat_freqid: Option<GaugeVec>,
 
     // Version / Devices
     pub version_info: GaugeVec,
@@ -107,13 +125,21 @@ pub struct Metrics {
     pub toff_clock_sec: prometheus::Gauge,
     pub toff_clock_nsec: prometheus::Gauge,
 
-    // PPS
+    // PPS gauges (always)
     pub pps_real_sec: prometheus::Gauge,
     pub pps_real_nsec: prometheus::Gauge,
     pub pps_clock_sec: prometheus::Gauge,
     pub pps_clock_nsec: prometheus::Gauge,
     pub pps_precision: prometheus::Gauge,
     pub pps_q_err: prometheus::Gauge,
+
+    // PPS histogram (optional)
+    pub pps_hist: Option<HistogramVec>,
+
+    // Geo-offset histograms (optional)
+    pub geo_offset_hist: Option<Histogram>,
+    pub geo_bearing_x_hist: Option<Histogram>,
+    pub geo_bearing_y_hist: Option<Histogram>,
 
     // OSC
     pub osc_running: prometheus::Gauge,
@@ -122,12 +148,93 @@ pub struct Metrics {
     pub osc_delta: prometheus::Gauge,
 }
 
+fn make_pps_buckets(bucket_size: i64, bucket_count: i64) -> Vec<f64> {
+    let half = bucket_count / 2;
+    let mut buckets: Vec<f64> = Vec::new();
+    for i in -half..=half {
+        buckets.push((i * bucket_size) as f64);
+    }
+    buckets
+}
+
+fn make_geo_offset_buckets(bucket_size: f64, bucket_count: i64) -> Vec<f64> {
+    (1..bucket_count).map(|i| i as f64 * bucket_size).collect()
+}
+
+fn make_geo_yx_buckets(bucket_size: f64, bucket_count: i64) -> Vec<f64> {
+    let half = bucket_count / 2;
+    (-half..=half).map(|i| i as f64 * bucket_size).collect()
+}
+
 impl Metrics {
     #[allow(clippy::too_many_lines)]
-    pub fn new() -> Self {
+    pub fn new(config: MetricsConfig) -> Self {
         let registry = Registry::new();
 
+        let sat_labels: &[&str] = &["PRN", "svid", "gnssid", "used"];
+
+        let (sat_ss, sat_az, sat_el, sat_is_used, sat_health, sat_sigid, sat_freqid) =
+            if config.monitor_satellites {
+                (
+                    Some(gauge_vec!(registry, "gpsd_sat_ss", "Signal to noise ratio in dBHz", sat_labels)),
+                    Some(gauge_vec!(registry, "gpsd_sat_az", "Azimuth, degrees from true north", sat_labels)),
+                    Some(gauge_vec!(registry, "gpsd_sat_el", "Elevation in degrees", sat_labels)),
+                    Some(gauge_vec!(registry, "gpsd_used", "Used satellite", sat_labels)),
+                    Some(gauge_vec!(registry, "gpsd_health", "Satellite health: 0=unknown, 1=OK, 2=unhealthy", sat_labels)),
+                    Some(gauge_vec!(registry, "gpsd_sat_sigid", "Signal ID", sat_labels)),
+                    Some(gauge_vec!(registry, "gpsd_sat_freqid", "GLONASS frequency ID", sat_labels)),
+                )
+            } else {
+                (None, None, None, None, None, None, None)
+            };
+
+        let pps_hist = if config.pps_histogram {
+            let buckets = make_pps_buckets(config.pps_bucket_size, config.pps_bucket_count);
+            let h = HistogramVec::new(
+                HistogramOpts::new("gpsd_pps_histogram", "PPS clock offset in nanoseconds")
+                    .buckets(buckets),
+                &["device"],
+            )
+            .expect("histogram can be created");
+            registry.register(Box::new(h.clone())).expect("collector can be registered");
+            Some(h)
+        } else {
+            None
+        };
+
+        let (geo_offset_hist, geo_bearing_x_hist, geo_bearing_y_hist) = if config.geo_offset {
+            let offset_buckets = make_geo_offset_buckets(config.geo_bucket_size, config.geo_bucket_count);
+            let yx_buckets = make_geo_yx_buckets(config.geo_bucket_size, config.geo_bucket_count);
+
+            let offset = Histogram::with_opts(
+                HistogramOpts::new("gpsd_geo_offset_m_histogram", "Geo offset from reference point in meters")
+                    .buckets(offset_buckets),
+            )
+            .expect("histogram can be created");
+            registry.register(Box::new(offset.clone())).expect("collector can be registered");
+
+            let bx = Histogram::with_opts(
+                HistogramOpts::new("gpsd_geo_bearing_x_histogram", "X offset in meters from static geo point")
+                    .buckets(yx_buckets.clone()),
+            )
+            .expect("histogram can be created");
+            registry.register(Box::new(bx.clone())).expect("collector can be registered");
+
+            let by = Histogram::with_opts(
+                HistogramOpts::new("gpsd_geo_bearing_y_histogram", "Y offset in meters from static geo point")
+                    .buckets(yx_buckets),
+            )
+            .expect("histogram can be created");
+            registry.register(Box::new(by.clone())).expect("collector can be registered");
+
+            (Some(offset), Some(bx), Some(by))
+        } else {
+            (None, None, None)
+        };
+
         Self {
+            config,
+
             // TPV
             lat: gauge!(registry, "gpsd_lat", "Latitude in degrees: +/- signifies North/South"),
             lon: gauge!(registry, "gpsd_long", "Longitude in degrees: +/- signifies East/West"),
@@ -184,14 +291,7 @@ impl Metrics {
             sat_used: gauge!(registry, "gpsd_sat_used", "Satellites used in current solution"),
             sat_seen: gauge!(registry, "gpsd_sat_seen", "Satellites seen in current solution"),
 
-            // Per-satellite
-            sat_ss: gauge_vec!(registry, "gpsd_sat_ss", "Signal to noise ratio in dBHz", &["PRN", "svid", "gnssid", "used"]),
-            sat_az: gauge_vec!(registry, "gpsd_sat_az", "Azimuth, degrees from true north", &["PRN", "svid", "gnssid", "used"]),
-            sat_el: gauge_vec!(registry, "gpsd_sat_el", "Elevation in degrees", &["PRN", "svid", "gnssid", "used"]),
-            sat_is_used: gauge_vec!(registry, "gpsd_used", "Used satellite", &["PRN", "svid", "gnssid", "used"]),
-            sat_health: gauge_vec!(registry, "gpsd_health", "Satellite health: 0=unknown, 1=OK, 2=unhealthy", &["PRN", "svid", "gnssid", "used"]),
-            sat_sigid: gauge_vec!(registry, "gpsd_sat_sigid", "Signal ID", &["PRN", "svid", "gnssid", "used"]),
-            sat_freqid: gauge_vec!(registry, "gpsd_sat_freqid", "GLONASS frequency ID", &["PRN", "svid", "gnssid", "used"]),
+            sat_ss, sat_az, sat_el, sat_is_used, sat_health, sat_sigid, sat_freqid,
 
             // Version / Devices
             version_info: gauge_vec!(registry, "gpsd_version_info", "GPSD version details", &["release", "rev", "proto_major", "proto_minor"]),
@@ -212,13 +312,18 @@ impl Metrics {
             toff_clock_sec: gauge!(registry, "gpsd_toff_clock_sec", "Seconds from the system clock"),
             toff_clock_nsec: gauge!(registry, "gpsd_toff_clock_nsec", "Nanoseconds from the system clock"),
 
-            // PPS
+            // PPS gauges
             pps_real_sec: gauge!(registry, "gpsd_pps_real_sec", "Seconds from the PPS source"),
             pps_real_nsec: gauge!(registry, "gpsd_pps_real_nsec", "Nanoseconds from the PPS source"),
             pps_clock_sec: gauge!(registry, "gpsd_pps_clock_sec", "Seconds from the system clock"),
             pps_clock_nsec: gauge!(registry, "gpsd_pps_clock_nsec", "Nanoseconds from the system clock"),
             pps_precision: gauge!(registry, "gpsd_pps_precision", "NTP style estimate of PPS precision"),
             pps_q_err: gauge!(registry, "gpsd_pps_qErr", "Quantization error of PPS in picoseconds"),
+
+            pps_hist,
+            geo_offset_hist,
+            geo_bearing_x_hist,
+            geo_bearing_y_hist,
 
             // OSC
             osc_running: gauge!(registry, "gpsd_osc_running", "Oscillator is currently running"),
@@ -291,6 +396,22 @@ impl Metrics {
         Self::set_if_some(&self.rel_n, tpv.relN);
         Self::set_if_some(&self.rel_e, tpv.relE);
         Self::set_if_some(&self.rel_d, tpv.relD);
+
+        if self.config.geo_offset {
+            if let (Some(lat), Some(lon)) = (tpv.lat, tpv.lon) {
+                let (dx, dy) = meter_offset_small(self.config.geo_lat, self.config.geo_lon, lat, lon);
+                let distance = earth_distance_small(lat, lon, self.config.geo_lat, self.config.geo_lon);
+                if let Some(ref h) = self.geo_offset_hist {
+                    h.observe(distance);
+                }
+                if let Some(ref h) = self.geo_bearing_x_hist {
+                    h.observe(dx);
+                }
+                if let Some(ref h) = self.geo_bearing_y_hist {
+                    h.observe(dy);
+                }
+            }
+        }
     }
 
     fn process_sky(&self, sky: &crate::gpsd::Sky) {
@@ -318,21 +439,23 @@ impl Metrics {
             self.sat_seen.set(seen);
             self.sat_used.set(used);
 
-            self.reset_satellite_vecs();
-            for sat in sats {
-                self.process_satellite(sat);
+            if self.config.monitor_satellites {
+                self.reset_satellite_vecs();
+                for sat in sats {
+                    self.process_satellite(sat);
+                }
             }
         }
     }
 
     fn reset_satellite_vecs(&self) {
-        self.sat_ss.reset();
-        self.sat_az.reset();
-        self.sat_el.reset();
-        self.sat_is_used.reset();
-        self.sat_health.reset();
-        self.sat_sigid.reset();
-        self.sat_freqid.reset();
+        if let Some(ref v) = self.sat_ss { v.reset(); }
+        if let Some(ref v) = self.sat_az { v.reset(); }
+        if let Some(ref v) = self.sat_el { v.reset(); }
+        if let Some(ref v) = self.sat_is_used { v.reset(); }
+        if let Some(ref v) = self.sat_health { v.reset(); }
+        if let Some(ref v) = self.sat_sigid { v.reset(); }
+        if let Some(ref v) = self.sat_freqid { v.reset(); }
     }
 
     fn process_satellite(&self, sat: &Satellite) {
@@ -343,26 +466,27 @@ impl Metrics {
         let used = sat.used.map_or("False", |u| if u { "True" } else { "False" });
         let labels = [prn.as_str(), svid_s.as_str(), gnssid.as_str(), used];
 
-        if let Some(v) = sat.ss {
-            self.sat_ss.with_label_values(&labels).set(v);
+        if let (Some(ref gv), Some(v)) = (&self.sat_ss, sat.ss) {
+            gv.with_label_values(&labels).set(v);
         }
-        if let Some(v) = sat.az {
-            self.sat_az.with_label_values(&labels).set(v);
+        if let (Some(ref gv), Some(v)) = (&self.sat_az, sat.az) {
+            gv.with_label_values(&labels).set(v);
         }
-        if let Some(v) = sat.el {
-            self.sat_el.with_label_values(&labels).set(v);
+        if let (Some(ref gv), Some(v)) = (&self.sat_el, sat.el) {
+            gv.with_label_values(&labels).set(v);
         }
-        self.sat_is_used
-            .with_label_values(&labels)
-            .set(if sat.used.unwrap_or(false) { 1.0 } else { 0.0 });
-        if let Some(v) = sat.health {
-            self.sat_health.with_label_values(&labels).set(v);
+        if let Some(ref gv) = self.sat_is_used {
+            gv.with_label_values(&labels)
+                .set(if sat.used.unwrap_or(false) { 1.0 } else { 0.0 });
         }
-        if let Some(v) = sat.sigid {
-            self.sat_sigid.with_label_values(&labels).set(v);
+        if let (Some(ref gv), Some(v)) = (&self.sat_health, sat.health) {
+            gv.with_label_values(&labels).set(v);
         }
-        if let Some(v) = sat.freqid {
-            self.sat_freqid.with_label_values(&labels).set(v);
+        if let (Some(ref gv), Some(v)) = (&self.sat_sigid, sat.sigid) {
+            gv.with_label_values(&labels).set(v);
+        }
+        if let (Some(ref gv), Some(v)) = (&self.sat_freqid, sat.freqid) {
+            gv.with_label_values(&labels).set(v);
         }
     }
 
@@ -373,6 +497,18 @@ impl Metrics {
         Self::set_if_some(&self.pps_clock_nsec, pps.clock_nsec);
         Self::set_if_some(&self.pps_precision, pps.precision);
         Self::set_if_some(&self.pps_q_err, pps.q_err);
+
+        if let Some(ref hist) = self.pps_hist {
+            if let Some(clock_nsec) = pps.clock_nsec {
+                let corr = self.config.pps_time1 * NSEC;
+                let mut value = clock_nsec - corr;
+                if value > NSEC / 2.0 {
+                    value -= NSEC;
+                }
+                let device = pps.device.as_deref().unwrap_or("unknown");
+                hist.with_label_values(&[device]).observe(value);
+            }
+        }
     }
 
     fn process_gst(&self, gst: &crate::gpsd::Gst) {
@@ -434,4 +570,26 @@ impl Metrics {
                 .set(1.0);
         }
     }
+}
+
+fn earth_distance_small(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let lat1r = lat1.to_radians();
+    let lat2r = lat2.to_radians();
+    let a = (dlat / 2.0).sin().powi(2) + lat1r.cos() * lat2r.cos() * (dlon / 2.0).sin().powi(2);
+    let c = 2.0 * a.sqrt().asin();
+    EARTH_RADIUS_M * c
+}
+
+fn meter_offset_small(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> (f64, f64) {
+    let mut dx = earth_distance_small(lat1, lon1, lat1, lon2);
+    let mut dy = earth_distance_small(lat1, lon1, lat2, lon1);
+    if lat1 < lat2 {
+        dy = -dy;
+    }
+    if lon1 < lon2 {
+        dx = -dx;
+    }
+    (dx, dy)
 }

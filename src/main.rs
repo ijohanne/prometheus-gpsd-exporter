@@ -13,7 +13,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use warp::Filter;
 
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, MetricsConfig};
 
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about = "Prometheus exporter for gpsd")]
@@ -38,6 +38,36 @@ struct Args {
 
     #[clap(long = "max-retry-delay", default_value_t = 300)]
     max_retry_delay: u64,
+
+    #[clap(short = 'S', long = "disable-monitor-satellites")]
+    disable_monitor_satellites: bool,
+
+    #[clap(long = "pps-histogram")]
+    pps_histogram: bool,
+
+    #[clap(long = "pps-bucket-size", default_value_t = 250)]
+    pps_bucket_size: i64,
+
+    #[clap(long = "pps-bucket-count", default_value_t = 40)]
+    pps_bucket_count: i64,
+
+    #[clap(long = "pps-time1", default_value_t = 0.0)]
+    pps_time1: f64,
+
+    #[clap(long = "offset-from-geopoint")]
+    offset_from_geopoint: bool,
+
+    #[clap(long = "geopoint-lat", default_value_t = 0.0, allow_negative_numbers = true)]
+    geopoint_lat: f64,
+
+    #[clap(long = "geopoint-lon", default_value_t = 0.0, allow_negative_numbers = true)]
+    geopoint_lon: f64,
+
+    #[clap(long = "geo-bucket-size", default_value_t = 0.5)]
+    geo_bucket_size: f64,
+
+    #[clap(long = "geo-bucket-count", default_value_t = 40)]
+    geo_bucket_count: i64,
 }
 
 fn with_metrics(
@@ -125,7 +155,20 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let metrics = Arc::new(Mutex::new(Metrics::new()));
+    let config = MetricsConfig {
+        monitor_satellites: !args.disable_monitor_satellites,
+        pps_histogram: args.pps_histogram,
+        pps_bucket_size: args.pps_bucket_size,
+        pps_bucket_count: args.pps_bucket_count,
+        pps_time1: args.pps_time1,
+        geo_offset: args.offset_from_geopoint,
+        geo_lat: args.geopoint_lat,
+        geo_lon: args.geopoint_lon,
+        geo_bucket_size: args.geo_bucket_size,
+        geo_bucket_count: args.geo_bucket_count,
+    };
+
+    let metrics = Arc::new(Mutex::new(Metrics::new(config)));
 
     let gpsd_metrics = metrics.clone();
     let gpsd_args = args.clone();
