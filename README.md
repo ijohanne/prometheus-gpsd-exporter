@@ -2,6 +2,26 @@
 
 Prometheus exporter for [gpsd](https://gpsd.io/). Connects to gpsd's JSON protocol over TCP and exposes GPS/GNSS metrics for Prometheus scraping.
 
+## Table of Contents
+
+- [Features](#features)
+- [Usage](#usage)
+  - [Options](#options)
+  - [Example](#example)
+- [Metrics](#metrics)
+  - [TPV](#tpv-time-position-velocity)
+  - [SKY](#sky-satellite-view)
+  - [Per-Satellite](#per-satellite-labels-prn-svid-gnssid-used)
+  - [GST](#gst-pseudorange-noise)
+  - [TOFF](#toff-time-offset)
+  - [PPS](#pps-pulse-per-second)
+  - [OSC](#osc-oscillator)
+  - [Geo-offset](#geo-offset-with---offset-from-geopoint)
+  - [Info](#info)
+- [Building](#building)
+- [NixOS Module](#nixos-module)
+- [License](#license)
+
 ## Features
 
 - **Streaming** — reads the gpsd JSON stream in real-time, not polling
