@@ -82,11 +82,7 @@ async fn metrics_handler(metrics: Arc<Mutex<Metrics>>) -> Result<impl warp::Repl
     let metric_families = m.registry.gather();
     let mut buffer = Vec::new();
     encoder.encode(&metric_families, &mut buffer).unwrap();
-    Ok(warp::reply::with_header(
-        buffer,
-        "content-type",
-        encoder.format_type(),
-    ))
+    Ok(warp::reply::with_header(buffer, "content-type", encoder.format_type()))
 }
 
 async fn gpsd_loop(args: Args, metrics: Arc<Mutex<Metrics>>) {
@@ -96,11 +92,8 @@ async fn gpsd_loop(args: Args, metrics: Arc<Mutex<Metrics>>) {
         let addr = format!("{}:{}", args.hostname, args.port);
         tracing::info!("connecting to gpsd at {addr}");
 
-        match tokio::time::timeout(
-            Duration::from_secs(args.timeout),
-            TcpStream::connect(&addr),
-        )
-        .await
+        match tokio::time::timeout(Duration::from_secs(args.timeout), TcpStream::connect(&addr))
+            .await
         {
             Ok(Ok(stream)) => {
                 tracing::info!("connected to gpsd at {addr}");
@@ -124,10 +117,7 @@ async fn gpsd_loop(args: Args, metrics: Arc<Mutex<Metrics>>) {
     }
 }
 
-async fn handle_gpsd_stream(
-    mut stream: TcpStream,
-    metrics: &Arc<Mutex<Metrics>>,
-) -> Result<()> {
+async fn handle_gpsd_stream(mut stream: TcpStream, metrics: &Arc<Mutex<Metrics>>) -> Result<()> {
     let watch_cmd = b"?WATCH={\"enable\":true,\"json\":true}\n";
     stream.write_all(watch_cmd).await?;
 

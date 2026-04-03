@@ -43,8 +43,22 @@
         pre-commit-check = git-hooks.lib.${system}.run {
           src = ./.;
           hooks = {
-            rustfmt.enable = true;
-            clippy.enable = true;
+            rustfmt = {
+              enable = true;
+              name = "rustfmt";
+              entry = "cargo fmt --check";
+              files = "^.*\\.rs$";
+              pass_filenames = false;
+              language = "system";
+            };
+            clippy = {
+              enable = true;
+              name = "clippy";
+              entry = "cargo clippy --all-targets --all-features -- -D warnings -D clippy::pedantic";
+              files = "^.*\\.rs$";
+              pass_filenames = false;
+              language = "system";
+            };
           };
           tools = {
             cargo = rustToolchain;

@@ -4,15 +4,24 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "class")]
 pub enum GpsdMessage {
-    VERSION(Version),
-    DEVICES(Devices),
-    WATCH(Watch),
-    TPV(Box<Tpv>),
-    SKY(Box<Sky>),
-    PPS(Pps),
-    GST(Gst),
-    TOFF(Toff),
-    OSC(Osc),
+    #[serde(rename = "VERSION")]
+    Version(Version),
+    #[serde(rename = "DEVICES")]
+    Devices(Devices),
+    #[serde(rename = "WATCH")]
+    Watch(Watch),
+    #[serde(rename = "TPV")]
+    Tpv(Box<Tpv>),
+    #[serde(rename = "SKY")]
+    Sky(Box<Sky>),
+    #[serde(rename = "PPS")]
+    Pps(Pps),
+    #[serde(rename = "GST")]
+    Gst(Gst),
+    #[serde(rename = "TOFF")]
+    Toff(Toff),
+    #[serde(rename = "OSC")]
+    Osc(Osc),
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,7 +122,8 @@ pub struct Sky {
 #[derive(Debug, Deserialize)]
 #[allow(non_snake_case)]
 pub struct Satellite {
-    pub PRN: Option<f64>,
+    #[serde(rename = "PRN")]
+    pub prn: Option<f64>,
     pub az: Option<f64>,
     pub el: Option<f64>,
     pub ss: Option<f64>,
